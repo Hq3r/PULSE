@@ -2,7 +2,7 @@
 
 // Contract Addresses
 export const CHAT_CONTRACT = 'BhRz5Qd2jtgTdaKPewYd4EjSquVegcmgxkqumH4GioKABQAGxofYfLiMCzy3EbFYFTBvHgnw94LkPa8NtPsv';
-
+export const STEALTH_CONTRACT = 'your-stealth-contract-address'; // Add actual stealth contract address
 
 // Transaction Values
 export const CUSTOM_MIN_BOX_VALUE = 400000n;
