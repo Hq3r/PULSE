@@ -114,7 +114,19 @@
     visibleRooms = getVisibleRooms(allRooms, hiddenRooms, roomState.showHiddenRooms);
     roomCategories = getRoomCategories(visibleRooms);
   }
-
+$: {
+  // Sort messages to ensure proper ordering: confirmed first, then pending
+  if (messages && messages.length > 0) {
+    messages = messages.sort((a, b) => {
+      // Pending messages always come after confirmed messages
+      if (a.pending && !b.pending) return 1;
+      if (!a.pending && b.pending) return -1;
+      
+      // Within the same type, sort by timestamp (chronological order)
+      return a.timestamp - b.timestamp;
+    });
+  }
+}
   // Watch for external wallet connection changes (with KYA check)
   $: if (walletConnected && kyaAccepted && !walletState.usingMnemonicWallet && !messageRefresh.isActive()) {
     handleFetchMessages().then(() => {

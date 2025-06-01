@@ -1,4 +1,4 @@
-// chatUtils.js - Complete chat functionality and wallet management
+// chatUtils.js - Complete chat functionality and wallet management with Node API support
 import { 
   TransactionBuilder,
   OutputBuilder,
@@ -16,6 +16,8 @@ import { stringToBytes } from '@scure/base';
 import {
   DEMO_CHAT_CONTRACT,
   API_BASE,
+  PULSE_ERGOTREE,
+  NODE_API_BASE,
   CUSTOM_MIN_BOX_VALUE,
   TRANSACTION_FEE,
   NETWORK_TYPE,
@@ -25,6 +27,77 @@ import {
   ENCRYPTION_CONFIG,
   WALLET_CONFIG
 } from './chatConstants.js';
+
+// ============= NODE ENDPOINTS CONFIGURATION =============
+
+export const NODE_ENDPOINTS = [
+  {
+    url: "http://213.239.193.208:9053",
+    name: "Primary Node",
+    corsProxy: false
+  },
+  {
+    url: "https://node.ergo.casa:9053",
+    name: "Ergo Casa Node",
+    corsProxy: false
+  },
+  {
+    url: "https://ergnode.io:9053",
+    name: "ErgNode.io",
+    corsProxy: false
+  },
+  {
+    url: "https://cors-anywhere.herokuapp.com/http://213.239.193.208:9053",
+    name: "CORS Proxy",
+    corsProxy: true
+  }
+];
+
+// ============= CORS HANDLING UTILITIES =============
+
+/**
+ * Fetch with automatic CORS fallback
+ * @param {string} endpoint - Endpoint path
+ * @param {Object} options - Fetch options
+ * @returns {Promise<Response>} - Fetch response
+ */
+export async function fetchWithCORSFallback(endpoint, options = {}) {
+  const errors = [];
+  
+  for (const nodeConfig of NODE_ENDPOINTS) {
+    try {
+      console.log(`Trying ${nodeConfig.name}: ${nodeConfig.url}${endpoint}`);
+      
+      const fetchOptions = {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(nodeConfig.corsProxy && {
+            'X-Requested-With': 'XMLHttpRequest'
+          })
+        },
+        ...options
+      };
+      
+      const response = await fetch(`${nodeConfig.url}${endpoint}`, fetchOptions);
+      
+      if (response.ok) {
+        console.log(`✅ Success with ${nodeConfig.name}`);
+        return response;
+      } else {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      
+    } catch (error) {
+      console.warn(`❌ Failed with ${nodeConfig.name}:`, error.message);
+      errors.push({ node: nodeConfig.name, error: error.message });
+      continue;
+    }
+  }
+  
+  const errorMsg = `All node endpoints failed:\n${errors.map(e => `${e.node}: ${e.error}`).join('\n')}`;
+  throw new Error(errorMsg);
+}
 
 // ============= ENCRYPTION UTILITIES =============
 
@@ -82,7 +155,6 @@ export function decryptMessage(encrypted, secretKey = ENCRYPTION_CONFIG.DEFAULT_
 
 /**
  * Process message content that may contain encrypted parts
- * Handles both fully encrypted messages and mixed content with encrypted sections
  * @param {string} content - The message content to process
  * @param {string} secretKey - The decryption key (default: "ergochat")
  * @returns {string} - The processed content with encrypted parts decrypted
@@ -154,7 +226,24 @@ export function isValidEncryptedMessage(encrypted) {
 export async function getCurrentHeight(maxRetries = TRANSACTION_CONFIG.HEIGHT_FETCH_RETRIES) {
   for (let i = 0; i < maxRetries; i++) {
     try {
-      const response = await fetch(`${API_BASE}/blocks?limit=1`);
+      // Try node first, then fallback to explorer
+      let response;
+      try {
+        response = await fetchWithCORSFallback('/info');
+        if (response.ok) {
+          const data = await response.json();
+          const height = data.fullHeight || data.headersHeight || data.height;
+          if (height) {
+            console.log(`Got height from node: ${height}`);
+            return height;
+          }
+        }
+      } catch (nodeError) {
+        console.warn(`Node height fetch failed (attempt ${i + 1}):`, nodeError.message);
+      }
+      
+      // Fallback to explorer API
+      response = await fetch(`${API_BASE}/blocks?limit=1`);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
@@ -163,6 +252,7 @@ export async function getCurrentHeight(maxRetries = TRANSACTION_CONFIG.HEIGHT_FE
       if (!height) {
         throw new Error('No height in response');
       }
+      console.log(`Got height from explorer: ${height}`);
       return height;
     } catch (error) {
       console.warn(`Height fetch attempt ${i + 1} failed:`, error);
@@ -231,6 +321,337 @@ export function parseBoxToMessage(box) {
   } catch (error) {
     console.error('Error parsing box to message:', error);
     return null;
+  }
+}
+
+// ============= NODE MEMPOOL UTILITIES =============
+
+/**
+ * Extract register value from node API format
+ * @param {*} register - Register data from node
+ * @returns {string} - Extracted value
+ */
+function extractNodeRegisterValue(register) {
+  if (!register) return '';
+  
+  // Node API might return registers in different formats
+  let value = register;
+  
+  // If it's an object, try different properties
+  if (typeof register === 'object') {
+    value = register.serializedValue || 
+            register.renderedValue || 
+            register.value || 
+            register;
+  }
+  
+  // Convert to string
+  value = String(value);
+  
+  // Handle Ergo encoding (remove 0e prefix and decode hex)
+  if (value.startsWith('0e')) {
+    try {
+      let hexStr = value.substring(2); // Remove '0e'
+      
+      // Remove length prefix if present (first 2 characters)
+      if (hexStr.length > 2) {
+        hexStr = hexStr.substring(2);
+      }
+      
+      // Convert hex to string
+      if (/^[0-9A-Fa-f]+$/.test(hexStr) && hexStr.length % 2 === 0) {
+        const bytes = [];
+        for (let i = 0; i < hexStr.length; i += 2) {
+          bytes.push(parseInt(hexStr.substring(i, i + 2), 16));
+        }
+        const decoded = new TextDecoder('utf-8').decode(new Uint8Array(bytes));
+        return decoded;
+      }
+    } catch (e) {
+      console.warn('Failed to decode hex value:', value, e);
+    }
+  }
+  
+  return value;
+}
+
+/**
+ * Parse a mempool transaction from node API into a message
+ * @param {Object} tx - Transaction object from node
+ * @returns {Object|null} - Parsed message or null
+ */
+export function parseNodeMempoolTxToMessage(tx) {
+  try {
+    console.log('Parsing node mempool tx:', tx.id);
+    
+    // Find the output that goes to the chat contract
+    const chatOutput = tx.outputs?.find(output => {
+     return output.ergoTree === PULSE_ERGOTREE;
+    });
+    
+    if (!chatOutput) {
+      console.log('No chat output found in transaction');
+      return null;
+    }
+    
+    console.log('Chat output found:', chatOutput);
+    
+    // Node API might have different register structure
+    const registers = chatOutput.additionalRegisters || chatOutput.registers || {};
+    console.log('Registers found:', registers);
+    
+    // Check if we have the required registers
+    if (!registers.R4 || !registers.R5 || !registers.R6) {
+      console.log('Missing required registers R4, R5, or R6');
+      return null;
+    }
+    
+    // Extract data using node-specific parsing
+    const sender = extractNodeRegisterValue(registers.R4);
+    let content = extractNodeRegisterValue(registers.R5);
+    const timestamp = parseInt(extractNodeRegisterValue(registers.R6)) || Math.floor(Date.now() / 1000);
+    const chatroomId = registers.R7 ? extractNodeRegisterValue(registers.R7) : 'general';
+    const parentId = registers.R8 ? extractNodeRegisterValue(registers.R8) : null;
+    
+    console.log('Parsed node values:', { sender, content, timestamp, chatroomId, parentId });
+    
+    // Process encrypted content
+    content = processMessageContent(content);
+    
+    // Validate that we have essential data
+    if (!sender || !content) {
+      console.log('Missing sender or content after parsing');
+      return null;
+    }
+    
+    return {
+      id: tx.id,
+      sender: sender.length > 12 ? `${sender.substring(0, 6)}...${sender.substring(sender.length - 4)}` : sender,
+      content,
+      timestamp,
+      chatroomId,
+      parentId,
+      pending: true,
+      isMempool: true,
+      source: 'node' // Mark as coming from node
+    };
+    
+  } catch (err) {
+    console.warn('Failed to parse node mempool transaction:', err);
+    return null;
+  }
+}
+
+/**
+ * Parse mempool transaction from explorer API (fallback)
+ * @param {Object} tx - Transaction from explorer API
+ * @returns {Object|null} - Parsed message or null
+ */
+export function parseMempoolTxToMessage(tx) {
+  try {
+    console.log('Parsing explorer mempool tx:', tx);
+    
+    // Find the output that goes to the chat contract
+    const chatOutput = tx.outputs?.find(output => output.address === DEMO_CHAT_CONTRACT);
+    console.log('Chat output found:', chatOutput);
+    
+    if (!chatOutput || !chatOutput.additionalRegisters) {
+      console.log('No chat output or additionalRegisters found');
+      return null;
+    }
+
+    const registers = chatOutput.additionalRegisters;
+    console.log('Registers found:', registers);
+    
+    // Check if we have the required registers (same as parseBoxToMessage)
+    if (!registers.R4 || !registers.R5 || !registers.R6) {
+      console.log('Missing required registers R4, R5, or R6');
+      return null;
+    }
+
+    // Use the same extractAndDecode function as parseBoxToMessage
+    function extractAndDecode(register) {
+      if (!register) return '';
+     
+      let value = register.renderedValue || register.serializedValue || String(register);
+     
+      if (value.startsWith('0e')) {
+        value = value.substring(4);
+      }
+     
+      if (/^[0-9A-Fa-f]+$/.test(value) && value.length % 2 === 0) {
+        try {
+          const bytes = [];
+          for (let i = 0; i < value.length; i += 2) {
+            bytes.push(parseInt(value.substring(i, i + 2), 16));
+          }
+          return new TextDecoder('utf-8').decode(new Uint8Array(bytes));
+        } catch (e) {
+          return value;
+        }
+      }
+      return value;
+    }
+
+    // Parse using the same logic as parseBoxToMessage
+    const sender = extractAndDecode(registers.R4);
+    let content = extractAndDecode(registers.R5);
+    const timestamp = parseInt(registers.R6?.renderedValue || registers.R6?.serializedValue) || Math.floor(Date.now() / 1000);
+    const chatroomId = registers.R7 ? extractAndDecode(registers.R7) : 'general';
+    const parentId = registers.R8 ? extractAndDecode(registers.R8) : null;
+
+    console.log('Parsed explorer mempool values:', { sender, content, timestamp, chatroomId, parentId });
+
+    // Process encrypted content (same as parseBoxToMessage)
+    content = processMessageContent(content);
+
+    // Validate that we have essential data
+    if (!sender || !content) {
+      console.log('Missing sender or content after parsing');
+      return null;
+    }
+
+    return {
+      id: tx.id || tx.transactionId,
+      sender: sender.length > 12 ? `${sender.substring(0, 6)}...${sender.substring(sender.length - 4)}` : sender,
+      content,
+      timestamp,
+      chatroomId,
+      parentId,
+      pending: true,
+      isMempool: true,
+      source: 'explorer'
+    };
+  } catch (err) {
+    console.warn('Failed to parse explorer mempool transaction:', err);
+    return null;
+  }
+}
+
+/**
+ * Fallback to explorer API if node fails
+ * @param {string} currentChatroom - Current chatroom
+ * @returns {Promise<Array>} - Fallback mempool messages
+ */
+async function fetchMempoolMessagesExplorerFallback(currentChatroom) {
+  try {
+    console.log('Using explorer API fallback for mempool messages...');
+    
+    const response = await fetch(`${API_BASE}/mempool/transactions/byAddress/${DEMO_CHAT_CONTRACT}`);
+    
+    if (!response.ok) {
+      console.warn('Explorer fallback also failed:', response.status);
+      return [];
+    }
+    
+    const data = await response.json();
+    
+    if (!data.items) {
+      return [];
+    }
+    
+    const mempoolMessages = [];
+    for (const tx of data.items) {
+      const message = parseMempoolTxToMessage(tx); // Use explorer parsing
+      
+      if (message && (!currentChatroom || message.chatroomId === currentChatroom)) {
+        message.source = 'explorer'; // Mark as coming from explorer
+        mempoolMessages.push(message);
+      }
+    }
+    
+    return mempoolMessages;
+    
+  } catch (err) {
+    console.error('Explorer fallback also failed:', err);
+    return [];
+  }
+}
+
+/**
+ * Fetch mempool messages directly from Ergo node with explorer fallback
+ * @param {string} currentChatroom - Current chatroom filter
+ * @returns {Promise<Array>} - Array of mempool messages
+ */
+export async function fetchMempoolMessages(currentChatroom = 'general') {
+  try {
+    console.log('🔍 Fetching mempool messages from node for chatroom:', currentChatroom);
+    
+    // Try different node endpoints for mempool
+    const possibleEndpoints = [
+      '/transactions/unconfirmed',
+      '/transactions/pool',
+      '/mempool/transactions',
+      '/api/v1/mempool/transactions'
+    ];
+    
+    let mempoolTxs = [];
+    let successfulEndpoint = null;
+    
+    // Try node endpoints first
+    for (const endpoint of possibleEndpoints) {
+      try {
+        console.log(`Trying node endpoint: ${endpoint}`);
+        const response = await fetchWithCORSFallback(endpoint);
+        const data = await response.json();
+        
+        mempoolTxs = Array.isArray(data) ? data : (data.transactions || data.items || []);
+        
+        if (mempoolTxs.length >= 0) { // Even empty array is success
+          successfulEndpoint = endpoint;
+          console.log(`✅ Successfully used node endpoint: ${endpoint}`);
+          break;
+        }
+        
+      } catch (error) {
+        console.warn(`Node endpoint ${endpoint} failed:`, error.message);
+        continue;
+      }
+    }
+    
+    // If node failed, try explorer fallback
+    if (!successfulEndpoint) {
+      console.log('All node endpoints failed, falling back to explorer API...');
+      return await fetchMempoolMessagesExplorerFallback(currentChatroom);
+    }
+    
+    console.log(`Found ${mempoolTxs.length} total mempool transactions from node`);
+    
+    // Filter transactions that interact with our chat contract
+    const chatTransactions = mempoolTxs.filter(tx => {
+      if (!tx.outputs || !Array.isArray(tx.outputs)) return false;
+      
+      return tx.outputs.some(output => {
+        return output.ergoTree === PULSE_ERGOTREE; 
+      });
+    });
+    
+    console.log(`Found ${chatTransactions.length} chat-related mempool transactions`);
+    
+    // Parse transactions into messages
+    const mempoolMessages = [];
+    for (const tx of chatTransactions) {
+      try {
+        const message = parseNodeMempoolTxToMessage(tx);
+        
+        if (message && (!currentChatroom || message.chatroomId === currentChatroom)) {
+          console.log('✅ Parsed mempool message:', message.id, message.content.substring(0, 50));
+          mempoolMessages.push(message);
+        }
+      } catch (parseError) {
+        console.warn('Failed to parse mempool transaction:', tx.id, parseError);
+      }
+    }
+    
+    console.log(`Returning ${mempoolMessages.length} mempool messages for chatroom: ${currentChatroom}`);
+    return mempoolMessages;
+    
+  } catch (err) {
+    console.error('Node mempool fetch failed completely:', err);
+    
+    // Final fallback to explorer API
+    console.log('Final fallback to explorer API...');
+    return await fetchMempoolMessagesExplorerFallback(currentChatroom);
   }
 }
 
@@ -422,35 +843,70 @@ export class MnemonicWallet {
         throw new Error(ERROR_MESSAGES.NO_OUTPUTS);
       }
       
-      const response = await fetch(`${API_BASE}/mempool/transactions/submit`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(signedTx)
-      });
-
-      const responseText = await response.text();
+      // Try node first, then fallback to explorer
+      let response;
+      let txId;
       
-      if (!response.ok) {
-        console.error('API Error Response:', responseText);
-        
-        // Parse specific error types for better handling
-        if (responseText.includes('double spend')) {
-          throw new Error(ERROR_MESSAGES.DOUBLE_SPEND);
-        } else {
-          throw new Error(ERROR_MESSAGES.TRANSACTION_SUBMIT_FAILED(response.status, responseText));
-        }
-      }
-
-      let result;
       try {
-        result = JSON.parse(responseText);
-      } catch (e) {
-        result = { id: responseText.trim() };
-      }
+        // Try submitting to node first
+        response = await fetchWithCORSFallback('/transactions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(signedTx)
+        });
 
-      const txId = result.id || result.transactionId || result;
+        if (response.ok) {
+          const responseText = await response.text();
+          let result;
+          try {
+            result = JSON.parse(responseText);
+          } catch (e) {
+            result = { id: responseText.trim() };
+          }
+          
+          txId = result.id || result.transactionId || result;
+          console.log('Transaction submitted successfully to node:', txId);
+          return txId;
+        } else {
+          throw new Error(`Node submission failed: ${response.status}`);
+        }
+        
+      } catch (nodeError) {
+        console.warn('Node submission failed, trying explorer:', nodeError.message);
+        
+        // Fallback to explorer API
+        response = await fetch(`${API_BASE}/mempool/transactions/submit`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(signedTx)
+        });
+
+        const responseText = await response.text();
+        
+        if (!response.ok) {
+          console.error('Explorer API Error Response:', responseText);
+          
+          // Parse specific error types for better handling
+          if (responseText.includes('double spend')) {
+            throw new Error(ERROR_MESSAGES.DOUBLE_SPEND);
+          } else {
+            throw new Error(ERROR_MESSAGES.TRANSACTION_SUBMIT_FAILED(response.status, responseText));
+          }
+        }
+
+        let result;
+        try {
+          result = JSON.parse(responseText);
+        } catch (e) {
+          result = { id: responseText.trim() };
+        }
+
+        txId = result.id || result.transactionId || result;
+      }
       
       if (!txId) {
         throw new Error(ERROR_MESSAGES.NO_TX_ID);
@@ -748,211 +1204,9 @@ export function formatTimestamp(timestamp) {
   return date.toLocaleString();
 }
 
-export function parseMempoolTxToMessage(tx) {
-  try {
-    console.log('Parsing mempool tx:', tx);
-    
-    // Find the output that goes to the chat contract
-    const chatOutput = tx.outputs?.find(output => output.address === DEMO_CHAT_CONTRACT);
-    console.log('Chat output found:', chatOutput);
-    
-    if (!chatOutput || !chatOutput.additionalRegisters) {
-      console.log('No chat output or additionalRegisters found');
-      return null;
-    }
-
-    const registers = chatOutput.additionalRegisters;
-    console.log('Registers found:', registers);
-    
-    // Check if we have the required registers (same as parseBoxToMessage)
-    if (!registers.R4 || !registers.R5 || !registers.R6) {
-      console.log('Missing required registers R4, R5, or R6');
-      return null;
-    }
-
-    // Use the same extractAndDecode function as parseBoxToMessage
-    function extractAndDecode(register) {
-      if (!register) return '';
-     
-      let value = register.renderedValue || register.serializedValue || String(register);
-     
-      if (value.startsWith('0e')) {
-        value = value.substring(4);
-      }
-     
-      if (/^[0-9A-Fa-f]+$/.test(value) && value.length % 2 === 0) {
-        try {
-          const bytes = [];
-          for (let i = 0; i < value.length; i += 2) {
-            bytes.push(parseInt(value.substring(i, i + 2), 16));
-          }
-          return new TextDecoder('utf-8').decode(new Uint8Array(bytes));
-        } catch (e) {
-          return value;
-        }
-      }
-      return value;
-    }
-
-    // Parse using the same logic as parseBoxToMessage
-    const sender = extractAndDecode(registers.R4);
-    let content = extractAndDecode(registers.R5);
-    const timestamp = parseInt(registers.R6?.renderedValue || registers.R6?.serializedValue) || Math.floor(Date.now() / 1000);
-    const chatroomId = registers.R7 ? extractAndDecode(registers.R7) : 'general';
-    const parentId = registers.R8 ? extractAndDecode(registers.R8) : null;
-
-    console.log('Parsed mempool values:', { sender, content, timestamp, chatroomId, parentId });
-
-    // Process encrypted content (same as parseBoxToMessage)
-    content = processMessageContent(content);
-
-    // Validate that we have essential data
-    if (!sender || !content) {
-      console.log('Missing sender or content after parsing');
-      return null;
-    }
-
-    return {
-      id: tx.id || tx.transactionId,
-      sender: sender.length > 12 ? `${sender.substring(0, 6)}...${sender.substring(sender.length - 4)}` : sender,
-      content,
-      timestamp,
-      chatroomId,
-      parentId,
-      pending: true,
-      isMempool: true
-    };
-  } catch (err) {
-    console.warn('Failed to parse mempool transaction:', err);
-    return null;
-  }
-}
-
-// Simplified fetchMempoolMessages using the corrected parsing
-// 1. FIRST - Add selectedChatroom parameter to fetchMempoolMessages
-export async function fetchMempoolMessages(currentChatroom = 'general') {
-  try {
-    console.log('🔍 Fetching mempool messages for chatroom:', currentChatroom);
-    const response = await fetch(`${API_BASE}/mempool/transactions/byAddress/${DEMO_CHAT_CONTRACT}`);
-    
-    console.log('Mempool response status:', response.status);
-    
-    if (!response.ok) {
-      console.warn('Mempool API not available or returned error:', response.status);
-      return [];
-    }
-
-    const data = await response.json();
-    console.log('Mempool raw data:', data);
-    
-    if (!data.items) {
-      console.log('No mempool items found');
-      return [];
-    }
-
-    console.log(`Found ${data.items.length} mempool transactions`);
-
-    const mempoolMessages = [];
-    for (const tx of data.items) {
-      console.log('Processing mempool tx:', tx.id);
-      
-      const message = parseMempoolTxToMessage(tx);
-      
-      if (message) {
-        console.log('✅ Parsed mempool message:', message);
-        // Filter by chatroom here instead of in the parsing function
-        if (!currentChatroom || message.chatroomId === currentChatroom) {
-          console.log('✅ Message matches chatroom, adding to list');
-          mempoolMessages.push(message);
-        } else {
-          console.log('❌ Message filtered out (wrong chatroom):', message.chatroomId, 'vs', currentChatroom);
-        }
-      } else {
-        console.log('❌ Failed to parse mempool message');
-      }
-    }
-
-    console.log(`Returning ${mempoolMessages.length} mempool messages`);
-    return mempoolMessages;
-  } catch (err) {
-    console.warn('Failed to fetch mempool messages:', err);
-    return [];
-  }
-}
-
-// Debug function to compare structures
-export function debugMempoolStructure(tx) {
-  console.log('=== MEMPOOL TX STRUCTURE DEBUG ===');
-  console.log('Full transaction:', tx);
-  
-  if (tx.outputs) {
-    tx.outputs.forEach((output, index) => {
-      console.log(`Output ${index}:`, output);
-      console.log(`Output ${index} address:`, output.address);
-      console.log(`Output ${index} additionalRegisters:`, output.additionalRegisters);
-      
-      if (output.address === DEMO_CHAT_CONTRACT) {
-        console.log('*** THIS IS THE CHAT OUTPUT ***');
-        if (output.additionalRegisters) {
-          Object.keys(output.additionalRegisters).forEach(key => {
-            const register = output.additionalRegisters[key];
-            console.log(`Register ${key}:`, register);
-            console.log(`Register ${key} renderedValue:`, register?.renderedValue);
-            console.log(`Register ${key} serializedValue:`, register?.serializedValue);
-          });
-        }
-      }
-    });
-  }
-  console.log('=== END DEBUG ===');
-}
-
-// Updated fetchMempoolMessages with structure debugging
-export async function fetchMempoolMessagesDebug() {
-  try {
-    console.log('🔍 Fetching mempool messages with debug...');
-    const response = await fetch(`${API_BASE}/mempool/transactions/byAddress/${DEMO_CHAT_CONTRACT}`);
-    
-    if (!response.ok) {
-      console.warn('Mempool API not available or returned error:', response.status);
-      return [];
-    }
-
-    const data = await response.json();
-    console.log('Mempool raw data:', data);
-    
-    if (!data.items) {
-      console.log('No mempool items found');
-      return [];
-    }
-
-    console.log(`Found ${data.items.length} mempool transactions`);
-
-    const mempoolMessages = [];
-    for (const tx of data.items) {
-      console.log(`\n--- Processing mempool tx: ${tx.id} ---`);
-      
-      // Debug the structure first
-      debugMempoolStructure(tx);
-      
-      const message = parseMempoolTxToMessage(tx);
-      
-      if (message && (!selectedChatroom || message.chatroomId === selectedChatroom)) {
-        console.log('✅ Valid mempool message:', message);
-        mempoolMessages.push(message);
-      } else {
-        console.log('❌ Invalid or filtered mempool message');
-      }
-    }
-
-    console.log(`Returning ${mempoolMessages.length} mempool messages`);
-    return mempoolMessages;
-  } catch (err) {
-    console.warn('Failed to fetch mempool messages:', err);
-    return [];
-  }
-}
-
+/**
+ * Convert hex string to UTF-8 string
+ */
 export function hexToString(hex) {
   if (!hex) return '';
   
@@ -997,9 +1251,133 @@ export function truncateAddress(address, prefixLength = 6, suffixLength = 4) {
   return `${address.substring(0, prefixLength)}...${address.substring(address.length - suffixLength)}`;
 }
 
+// ============= DEBUG AND TEST FUNCTIONS =============
+
+/**
+ * Test node connectivity and mempool access
+ */
+export async function testNodeConnection() {
+  console.log('🧪 Testing node connection...');
+  
+  const tests = [
+    {
+      name: 'Node Info',
+      endpoint: '/info',
+      description: 'Basic node information'
+    },
+    {
+      name: 'Mempool Size',
+      endpoint: '/transactions/unconfirmed',
+      description: 'Get mempool transactions'
+    },
+    {
+      name: 'Alternative Mempool',
+      endpoint: '/transactions/pool',
+      description: 'Alternative mempool endpoint'
+    }
+  ];
+  
+  for (const test of tests) {
+    try {
+      console.log(`\n--- Testing: ${test.name} ---`);
+      console.log(`Endpoint: ${NODE_ENDPOINTS[0].url}${test.endpoint}`);
+      
+      const response = await fetchWithCORSFallback(test.endpoint);
+      
+      console.log(`Status: ${response.status} ${response.statusText}`);
+      console.log(`Headers:`, Object.fromEntries(response.headers.entries()));
+      
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`✅ ${test.name} - Success!`);
+        
+        if (test.endpoint.includes('transactions')) {
+          const txs = Array.isArray(data) ? data : (data.transactions || data.items || []);
+          console.log(`Found ${txs.length} transactions in mempool`);
+          
+          // Check for chat transactions
+          const chatTxs = txs.filter(tx => 
+          tx.outputs?.some(output => output.ergoTree === PULSE_ERGOTREE)
+          );
+          console.log(`Found ${chatTxs.length} chat-related transactions`);
+          
+          if (chatTxs.length > 0) {
+            console.log('Sample chat transaction:', chatTxs[0]);
+          }
+        } else {
+          console.log('Response sample:', JSON.stringify(data, null, 2).substring(0, 500));
+        }
+      } else {
+        console.log(`❌ ${test.name} - Failed: ${response.status}`);
+        const text = await response.text();
+        console.log('Error response:', text.substring(0, 200));
+      }
+      
+    } catch (error) {
+      console.log(`❌ ${test.name} - Error:`, error.message);
+    }
+  }
+  
+  console.log('\n🏁 Node connection test completed');
+}
+
+/**
+ * Test specific mempool message parsing
+ */
+export async function testMempoolParsing() {
+  try {
+    console.log('🧪 Testing mempool message parsing...');
+    const messages = await fetchMempoolMessages('general');
+    
+    console.log(`Found ${messages.length} mempool messages`);
+    
+    messages.forEach((msg, i) => {
+      console.log(`Message ${i + 1}:`, {
+        id: msg.id,
+        sender: msg.sender,
+        content: msg.content.substring(0, 50) + '...',
+        chatroom: msg.chatroomId,
+        pending: msg.pending,
+        source: msg.source
+      });
+    });
+    
+  } catch (error) {
+    console.error('Failed to test mempool parsing:', error);
+  }
+}
+
+// Auto-expose test functions in development
+if (typeof window !== 'undefined') {
+  // Always expose in development environments
+  if (window.location.hostname === 'localhost' || 
+      window.location.hostname === '127.0.0.1' ||
+      window.location.hostname.includes('dev') ||
+      window.location.port) {
+    
+    window.testNodeConnection = testNodeConnection;
+    window.testMempoolParsing = testMempoolParsing;
+    
+    // Also expose the main fetch function for manual testing
+    window.fetchMempoolMessages = fetchMempoolMessages;
+    window.fetchWithCORSFallback = fetchWithCORSFallback;
+    
+    console.log('🔧 Node test functions available:');
+    console.log('- window.testNodeConnection()');
+    console.log('- window.testMempoolParsing()');
+    console.log('- window.fetchMempoolMessages("general")');
+    console.log('- window.fetchWithCORSFallback("/info")');
+  }
+}
+
 // ============= EXPORTS =============
 
 export default {
+  // Node utilities
+  fetchWithCORSFallback,
+  testNodeConnection,
+  testMempoolParsing,
+  
   // Encryption
   encryptMessage,
   decryptMessage,
@@ -1007,8 +1385,11 @@ export default {
   hasEncryptedContent,
   extractEncryptedParts,
   isValidEncryptedMessage,
+  
+  // Mempool
   fetchMempoolMessages,
-  hexToString,
+  parseNodeMempoolTxToMessage,
+  parseMempoolTxToMessage,
   
   // Blockchain
   getCurrentHeight,
@@ -1025,5 +1406,6 @@ export default {
   nanoErgToErg,
   ergToNanoErg,
   formatTimestamp,
-  truncateAddress
+  truncateAddress,
+  hexToString
 };

@@ -1,333 +1,340 @@
-// roomDiscovery.js - Room discovery utilities for ErgoChat
-
-import { API_BASE, DEMO_CHAT_CONTRACT, DEFAULT_CHATROOMS } from './chatConstants.js';
+// roomDiscovery.js - Room discovery functionality for ErgoChat
+import {
+  DEMO_CHAT_CONTRACT,
+  API_BASE,
+  DEFAULT_CHATROOMS
+} from './chatConstants.js';
 import { parseBoxToMessage } from './chatUtils.js';
 
-// Cache for discovered rooms to avoid repeated API calls
-let roomDiscoveryCache = {
-  rooms: new Map(),
-  lastUpdate: 0,
-  cacheTimeout: 5 * 60 * 1000 // 5 minutes
-};
-
 /**
- * Extract room information from a parsed message
- * @param {Object} message - Parsed message object
- * @param {string} currentUserAddress - Current user's wallet address
- * @returns {Object|null} - Room info object or null
- */
-function extractRoomInfo(message, currentUserAddress) {
-  if (!message || !message.chatroomId) return null;
-
-  const roomId = message.chatroomId;
-  
-  // Skip default rooms - they're hardcoded
-  if (DEFAULT_CHATROOMS.some(room => room.id === roomId)) {
-    return null;
-  }
-
-  // Determine room type
-  const isPrivate = roomId.startsWith('pm') || roomId.startsWith('private-');
-  
-  // For private rooms, check if user has access
-  if (isPrivate) {
-    // User has access if:
-    // 1. They are the creator (first message sender)
-    // 2. They have sent a message in this room
-    const userHasAccess = message.sender === currentUserAddress || 
-                         checkUserAccessToPrivateRoom(roomId, currentUserAddress);
-    
-    if (!userHasAccess) {
-      return null;
-    }
-  }
-
-  return {
-    id: roomId,
-    name: formatRoomName(roomId),
-    description: `${isPrivate ? 'Private' : 'Public'} room discovered from blockchain`,
-    isPrivate,
-    isDiscovered: true,
-    createdAt: message.timestamp,
-    creator: message.sender
-  };
-}
-
-/**
- * Format room ID into a display name
- * @param {string} roomId - The room ID
- * @returns {string} - Formatted room name
- */
-function formatRoomName(roomId) {
-  if (roomId.startsWith('private-')) {
-    return roomId.replace('private-', 'Private ');
-  }
-  if (roomId.startsWith('pm')) {
-    return roomId.replace('pm', 'PM ');
-  }
-  
-  // For public rooms, capitalize and format
-  return roomId
-    .split(/[-_]/)
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ');
-}
-
-/**
- * Check if user has access to a private room by looking at message history
- * @param {string} roomId - Private room ID
- * @param {string} userAddress - User's wallet address
- * @returns {boolean} - True if user has sent messages in this room
- */
-function checkUserAccessToPrivateRoom(roomId, userAddress) {
-  // This would need to be implemented to check if user has sent messages
-  // in this private room by scanning their transaction history
-  // For now, we'll return false and let the room be discovered only
-  // when the user sends their first message
-  return false;
-}
-
-/**
- * Discover rooms from blockchain by scanning contract boxes
- * @param {string} currentUserAddress - Current user's wallet address (truncated)
- * @param {number} limit - Maximum number of boxes to scan
+ * Discover all available chatrooms from the blockchain
  * @returns {Promise<Array>} - Array of discovered room objects
  */
-export async function discoverRoomsFromBlockchain(currentUserAddress, limit = 200) {
+export async function discoverChatrooms() {
   try {
-    console.log('🔍 Discovering rooms from blockchain...');
+    console.log('🔍 Discovering chatrooms from blockchain...');
     
-    // Check cache first
-    const now = Date.now();
-    if (now - roomDiscoveryCache.lastUpdate < roomDiscoveryCache.cacheTimeout) {
-      console.log('Using cached room discovery data');
-      return Array.from(roomDiscoveryCache.rooms.values());
-    }
-
-    // Fetch boxes from the chat contract
-    const response = await fetch(`${API_BASE}/boxes/byAddress/${DEMO_CHAT_CONTRACT}?limit=${limit}`);
+    // Fetch all boxes from the chat contract
+    const response = await fetch(`${API_BASE}/boxes/unspent/byAddress/${DEMO_CHAT_CONTRACT}?limit=500`);
     
     if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
+      console.warn('Failed to fetch boxes for room discovery:', response.status);
+      return DEFAULT_CHATROOMS;
     }
 
     const data = await response.json();
-    if (!data.items) {
-      throw new Error('Invalid API response');
-    }
+    const boxes = data.items || [];
+    
+    console.log(`Found ${boxes.length} boxes to analyze for rooms`);
 
-    console.log(`Found ${data.items.length} boxes to analyze for rooms`);
-
-    const discoveredRooms = new Map();
-    const userMessageCounts = new Map();
-
-    // Process each box to extract room information
-    for (const box of data.items) {
-      const message = parseBoxToMessage(box);
-      if (!message) continue;
-
-      // Track user messages for private room access
-      const roomId = message.chatroomId;
-      if (!userMessageCounts.has(roomId)) {
-        userMessageCounts.set(roomId, new Set());
-      }
-      userMessageCounts.get(roomId).add(message.sender);
-
-      // Extract room info
-      const roomInfo = extractRoomInfo(message, currentUserAddress);
-      if (!roomInfo) continue;
-
-      // Update room info if we found an earlier message (creator info)
-      const existing = discoveredRooms.get(roomInfo.id);
-      if (!existing || message.timestamp < existing.createdAt) {
-        roomInfo.createdAt = message.timestamp;
-        roomInfo.creator = message.sender;
-      }
-
-      discoveredRooms.set(roomInfo.id, roomInfo);
-    }
-
-    // Filter private rooms based on user access
-    const accessibleRooms = [];
-    for (const [roomId, roomInfo] of discoveredRooms) {
-      if (roomInfo.isPrivate) {
-        // Check if current user has sent messages in this room
-        const roomUsers = userMessageCounts.get(roomId);
-        const userHasAccess = roomUsers && roomUsers.has(currentUserAddress);
-        
-        if (userHasAccess) {
-          accessibleRooms.push(roomInfo);
+    // Extract unique room IDs from R7 register
+    const discoveredRoomIds = new Set();
+    const roomSamples = new Map(); // Store sample messages for room descriptions
+    
+    for (const box of boxes) {
+      try {
+        const message = parseBoxToMessage(box);
+        if (message && message.chatroomId) {
+          discoveredRoomIds.add(message.chatroomId);
+          
+          // Store a sample message for each room (for potential description generation)
+          if (!roomSamples.has(message.chatroomId)) {
+            roomSamples.set(message.chatroomId, message);
+          }
         }
-      } else {
-        // Public rooms are always accessible
-        accessibleRooms.push(roomInfo);
+      } catch (error) {
+        console.warn('Error parsing box for room discovery:', error);
+        // Continue with other boxes
       }
     }
 
-    // Update cache
-    roomDiscoveryCache.rooms.clear();
-    accessibleRooms.forEach(room => {
-      roomDiscoveryCache.rooms.set(room.id, room);
-    });
-    roomDiscoveryCache.lastUpdate = now;
+    console.log('Discovered room IDs:', Array.from(discoveredRoomIds));
 
-    console.log(`Discovered ${accessibleRooms.length} accessible rooms`);
-    return accessibleRooms;
+    // Convert discovered room IDs to room objects
+    const discoveredRooms = [];
+    
+    for (const roomId of discoveredRoomIds) {
+      // Skip if it's already a default room
+      if (DEFAULT_CHATROOMS.some(room => room.id === roomId)) {
+        continue;
+      }
 
+      // Create room object
+      const room = createRoomFromId(roomId, roomSamples.get(roomId));
+      if (room) {
+        discoveredRooms.push(room);
+      }
+    }
+
+    console.log(`✅ Discovered ${discoveredRooms.length} new rooms:`, discoveredRooms.map(r => r.name));
+    
+    return discoveredRooms;
+    
   } catch (error) {
-    console.error('Error discovering rooms from blockchain:', error);
+    console.error('Error discovering chatrooms:', error);
     return [];
   }
 }
 
 /**
- * Get all rooms including default and discovered ones
- * @param {string} currentUserAddress - Current user's wallet address
- * @returns {Promise<Array>} - Combined array of all rooms
+ * Create a room object from a room ID
+ * @param {string} roomId - The room identifier
+ * @param {Object} sampleMessage - Sample message from the room (optional)
+ * @returns {Object|null} - Room object or null if invalid
  */
-export async function getAllRooms(currentUserAddress) {
-  const discoveredRooms = await discoverRoomsFromBlockchain(currentUserAddress);
-  
-  // Combine default rooms with discovered rooms
-  const allRooms = [
-    ...DEFAULT_CHATROOMS,
-    ...discoveredRooms
-  ];
-
-  // Remove duplicates (in case a discovered room has the same ID as a default one)
-  const uniqueRooms = allRooms.filter((room, index, self) => 
-    index === self.findIndex(r => r.id === room.id)
-  );
-
-  return uniqueRooms;
-}
-
-/**
- * Create a new public room by generating a unique room ID
- * @param {string} roomName - The desired room name
- * @param {string} description - Room description
- * @returns {Object} - New room object
- */
-export function createPublicRoom(roomName, description = '') {
-  // Generate room ID from name
-  const roomId = roomName
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
-
-  return {
-    id: roomId,
-    name: roomName,
-    description: description || `Public room: ${roomName}`,
-    isPrivate: false,
-    isDiscovered: false, // This will become discovered once first message is sent
-    createdAt: Math.floor(Date.now() / 1000)
-  };
-}
-
-/**
- * Create a new private room with a unique code
- * @param {string} roomName - The desired room name
- * @param {string} customCode - Optional custom 10-digit code
- * @returns {Object} - New private room object
- */
-export function createPrivateRoom(roomName, customCode = null) {
-  // Generate or use custom code
-  const code = customCode || generatePrivateRoomCode();
-  
-  if (customCode && (customCode.length !== 10 || !/^\d+$/.test(customCode))) {
-    throw new Error('Custom code must be exactly 10 digits');
+function createRoomFromId(roomId, sampleMessage = null) {
+  if (!roomId || typeof roomId !== 'string') {
+    return null;
   }
 
-  const roomId = `private-${code}`;
-
-  return {
-    id: roomId,
-    name: roomName,
-    description: `Private room: ${roomName}`,
-    isPrivate: true,
-    isDiscovered: false,
-    createdAt: Math.floor(Date.now() / 1000),
-    code: code
-  };
-}
-
-/**
- * Generate a random 10-digit code for private rooms
- * @returns {string} - 10-digit code
- */
-function generatePrivateRoomCode() {
-  return Math.floor(1000000000 + Math.random() * 9000000000).toString();
-}
-
-/**
- * Join a private room using a 10-digit code
- * @param {string} code - The 10-digit private room code
- * @param {Array} existingRooms - Array of existing rooms to check against
- * @returns {Object} - Room object for the private room
- */
-export function joinPrivateRoomByCode(code, existingRooms = []) {
-  if (!code || code.length !== 10 || !/^\d+$/.test(code)) {
-    throw new Error('Invalid room code. Must be exactly 10 digits.');
-  }
-
-  const roomId = `private-${code}`;
-  
-  // Check if room already exists in our list
-  const existingRoom = existingRooms.find(room => room.id === roomId);
-  if (existingRoom) {
-    return existingRoom;
-  }
-
-  // Create new room object for joining
-  return {
-    id: roomId,
-    name: `Private Room ${code}`,
-    description: `Private room accessed with code: ${code}`,
-    isPrivate: true,
-    isDiscovered: false,
-    createdAt: Math.floor(Date.now() / 1000),
-    code: code
-  };
-}
-
-/**
- * Clear the room discovery cache (useful for force refresh)
- */
-export function clearRoomDiscoveryCache() {
-  roomDiscoveryCache.rooms.clear();
-  roomDiscoveryCache.lastUpdate = 0;
-}
-
-/**
- * Check if a room ID represents a private room
- * @param {string} roomId - Room ID to check
- * @returns {boolean} - True if it's a private room
- */
-export function isPrivateRoom(roomId) {
-  return roomId.startsWith('pm') || roomId.startsWith('private-');
-}
-
-/**
- * Extract private room code from room ID
- * @param {string} roomId - Private room ID
- * @returns {string|null} - Room code or null if not a private room
- */
-export function extractPrivateRoomCode(roomId) {
+  // Handle private rooms (format: private-1234567890)
   if (roomId.startsWith('private-')) {
-    return roomId.replace('private-', '');
+    const code = roomId.replace('private-', '');
+    if (code.length === 10 && /^\d+$/.test(code)) {
+      return {
+        id: roomId,
+        name: `Private Room ${code}`,
+        description: 'Private chat room',
+        isPrivate: true,
+        isDiscovered: true,
+        code: code
+      };
+    }
   }
-  return null;
+
+  // Handle custom public rooms
+  const roomName = formatRoomName(roomId);
+  const description = generateRoomDescription(roomId, sampleMessage);
+
+  return {
+    id: roomId,
+    name: roomName,
+    description: description,
+    isPrivate: false,
+    isDiscovered: true
+  };
+}
+
+/**
+ * Format room ID into a human-readable name
+ * @param {string} roomId - The room identifier
+ * @returns {string} - Formatted room name
+ */
+function formatRoomName(roomId) {
+  if (!roomId) return 'Unknown Room';
+
+  // Handle special formatting patterns
+  if (roomId.includes('-')) {
+    // Convert kebab-case to title case: "custom-testing-room" -> "Custom Testing Room"
+    return roomId
+      .split('-')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+  }
+
+  // Handle camelCase: "testingRoom" -> "Testing Room"
+  if (/[a-z][A-Z]/.test(roomId)) {
+    return roomId
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .replace(/^./, str => str.toUpperCase());
+  }
+
+  // Handle single words: "testing" -> "Testing"
+  return roomId.charAt(0).toUpperCase() + roomId.slice(1);
+}
+
+/**
+ * Generate a description for a discovered room
+ * @param {string} roomId - The room identifier
+ * @param {Object} sampleMessage - Sample message from the room (optional)
+ * @returns {string} - Room description
+ */
+function generateRoomDescription(roomId, sampleMessage = null) {
+  // Try to infer purpose from room name
+  const lowerRoomId = roomId.toLowerCase();
+  
+  if (lowerRoomId.includes('test')) {
+    return 'Testing and development discussions';
+  }
+  if (lowerRoomId.includes('trade') || lowerRoomId.includes('market')) {
+    return 'Trading and market discussions';
+  }
+  if (lowerRoomId.includes('dev') || lowerRoomId.includes('development')) {
+    return 'Development and technical discussions';
+  }
+  if (lowerRoomId.includes('game') || lowerRoomId.includes('gaming')) {
+    return 'Gaming related discussions';
+  }
+  if (lowerRoomId.includes('nft') || lowerRoomId.includes('art')) {
+    return 'NFT and art discussions';
+  }
+  if (lowerRoomId.includes('defi') || lowerRoomId.includes('finance')) {
+    return 'DeFi and finance discussions';
+  }
+  
+  // Generic description
+  return 'Community discussion room';
+}
+
+/**
+ * Get room statistics from discovered rooms
+ * @param {Array} allRooms - All available rooms
+ * @returns {Object} - Statistics object
+ */
+export function getRoomStatistics(allRooms) {
+  const stats = {
+    total: allRooms.length,
+    default: 0,
+    custom: 0,
+    private: 0,
+    discovered: 0
+  };
+
+  for (const room of allRooms) {
+    if (DEFAULT_CHATROOMS.some(dr => dr.id === room.id)) {
+      stats.default++;
+    } else if (room.isPrivate) {
+      stats.private++;
+    } else if (room.isDiscovered) {
+      stats.discovered++;
+    } else {
+      stats.custom++;
+    }
+  }
+
+  return stats;
+}
+
+/**
+ * Check if a room ID is valid for creation
+ * @param {string} roomId - Room ID to validate
+ * @returns {boolean} - True if valid
+ */
+export function isValidRoomId(roomId) {
+  if (!roomId || typeof roomId !== 'string') {
+    return false;
+  }
+
+  // Check length (reasonable limits)
+  if (roomId.length < 3 || roomId.length > 50) {
+    return false;
+  }
+
+  // Check for valid characters (alphanumeric, hyphens, underscores)
+  if (!/^[a-zA-Z0-9\-_]+$/.test(roomId)) {
+    return false;
+  }
+
+  // Check that it doesn't start or end with special characters
+  if (/^[-_]|[-_]$/.test(roomId)) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Search for rooms by name or description
+ * @param {Array} rooms - Array of room objects
+ * @param {string} query - Search query
+ * @returns {Array} - Filtered rooms
+ */
+export function searchRooms(rooms, query) {
+  if (!query || !query.trim()) {
+    return rooms;
+  }
+
+  const searchTerm = query.toLowerCase().trim();
+  
+  return rooms.filter(room => {
+    const nameMatch = room.name.toLowerCase().includes(searchTerm);
+    const descMatch = room.description?.toLowerCase().includes(searchTerm);
+    const idMatch = room.id.toLowerCase().includes(searchTerm);
+    
+    return nameMatch || descMatch || idMatch;
+  });
+}
+
+/**
+ * Sort rooms by activity level (based on recent message count)
+ * This would need to be enhanced with actual message counting
+ * @param {Array} rooms - Array of room objects
+ * @returns {Array} - Sorted rooms
+ */
+export function sortRoomsByActivity(rooms) {
+  // For now, sort by type and name
+  // In a full implementation, you'd count recent messages per room
+  
+  return [...rooms].sort((a, b) => {
+    // Default rooms first
+    const aIsDefault = DEFAULT_CHATROOMS.some(dr => dr.id === a.id);
+    const bIsDefault = DEFAULT_CHATROOMS.some(dr => dr.id === b.id);
+    
+    if (aIsDefault && !bIsDefault) return -1;
+    if (!aIsDefault && bIsDefault) return 1;
+    
+    // Then by room name
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/**
+ * Cache for discovered rooms (in-memory)
+ */
+const roomCache = {
+  rooms: [],
+  lastUpdate: 0,
+  cacheTimeout: 5 * 60 * 1000 // 5 minutes
+};
+
+/**
+ * Get rooms with caching
+ * @param {boolean} forceRefresh - Force refresh of cache
+ * @returns {Promise<Array>} - Cached or fresh room data
+ */
+export async function getCachedDiscoveredRooms(forceRefresh = false) {
+  const now = Date.now();
+  
+  // Check if cache is valid
+  if (!forceRefresh && 
+      roomCache.rooms.length > 0 && 
+      (now - roomCache.lastUpdate) < roomCache.cacheTimeout) {
+    console.log('📦 Using cached room data');
+    return roomCache.rooms;
+  }
+
+  // Refresh cache
+  console.log('🔄 Refreshing room cache...');
+  try {
+    const discoveredRooms = await discoverChatrooms();
+    roomCache.rooms = discoveredRooms;
+    roomCache.lastUpdate = now;
+    
+    return discoveredRooms;
+  } catch (error) {
+    console.error('Error refreshing room cache:', error);
+    // Return cached data even if refresh failed
+    return roomCache.rooms;
+  }
+}
+
+/**
+ * Clear room cache
+ */
+export function clearRoomCache() {
+  roomCache.rooms = [];
+  roomCache.lastUpdate = 0;
 }
 
 export default {
-  discoverRoomsFromBlockchain,
-  getAllRooms,
-  createPublicRoom,
-  createPrivateRoom,
-  joinPrivateRoomByCode,
-  clearRoomDiscoveryCache,
-  isPrivateRoom,
-  extractPrivateRoomCode
+  discoverChatrooms,
+  createRoomFromId,
+  formatRoomName,
+  generateRoomDescription,
+  getRoomStatistics,
+  isValidRoomId,
+  searchRooms,
+  sortRoomsByActivity,
+  getCachedDiscoveredRooms,
+  clearRoomCache
 };
