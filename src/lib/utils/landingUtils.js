@@ -1,4 +1,4 @@
-// landingUtils.js - Main chat functionality utilities with fixed message ordering
+// landingUtils.js - Updated with encrypted private room support
 import { stringToBytes } from '@scure/base';
 import { SColl, SByte, SLong } from '@fleet-sdk/serializer';
 import { OutputBuilder } from '@fleet-sdk/core';
@@ -29,16 +29,31 @@ import {
   getCommonBoxIds
 } from './transactionUtils.js';
 
-// ============= MESSAGE FETCHING =============
+// Import encryption utilities
+import {
+  getBlockchainRoomId,
+  getDisplayRoomId,
+  processMessageFromPrivateRoom,
+  isEncryptedPrivateRoom
+} from './privateRoomEncryption.js';
 
-export async function fetchMessages(selectedChatroom) {
+// ============= MESSAGE FETCHING WITH ENCRYPTION SUPPORT =============
+
+export async function fetchMessages(selectedChatroom, allRooms = []) {
   try {
     console.log('🔄 Fetching messages for chatroom:', selectedChatroom);
+    
+    // Get the blockchain room ID for the selected room
+    const blockchainRoomId = getBlockchainRoomId(selectedChatroom);
+    console.log('Room ID transformation:', {
+      display: selectedChatroom,
+      blockchain: blockchainRoomId
+    });
     
     // Fetch both confirmed and mempool messages in parallel
     const [confirmedResponse, mempoolMessages] = await Promise.all([
       fetch(`${API_BASE}/boxes/byAddress/${DEMO_CHAT_CONTRACT}?limit=100`),
-      fetchMempoolMessages(selectedChatroom)
+      fetchMempoolMessages(blockchainRoomId) // Use blockchain room ID for mempool
     ]);
 
     console.log('Confirmed response:', confirmedResponse.status);
@@ -53,29 +68,87 @@ export async function fetchMessages(selectedChatroom) {
       throw new Error('Invalid API response');
     }
 
-    // Parse confirmed messages
+    // Parse confirmed messages with encryption support
     const confirmedMessages = [];
     for (const box of confirmedData.items) {
-      const message = parseBoxToMessage(box);
-      if (message && (!selectedChatroom || message.chatroomId === selectedChatroom)) {
-        confirmedMessages.push(message);
+      let message = parseBoxToMessage(box);
+      if (message && message.chatroomId) {
+        // Process the message to handle encrypted room IDs
+        message = processMessageFromPrivateRoom(message);
+        
+        // Enhanced room matching logic
+        const messageRoomId = message.chatroomId;
+        let isMatch = false;
+        
+        if (!selectedChatroom || selectedChatroom === 'general') {
+          // For general or no selection, include general messages
+          isMatch = messageRoomId === 'general';
+        } else {
+          // Direct match with display room ID
+          if (messageRoomId === selectedChatroom) {
+            isMatch = true;
+          }
+          
+          // Match with blockchain room ID
+          if (messageRoomId === blockchainRoomId) {
+            isMatch = true;
+          }
+          
+          // For encrypted private rooms, also check the blockchain room ID
+          if (message.blockchainRoomId === blockchainRoomId) {
+            isMatch = true;
+          }
+          
+          // Legacy hex encoding checks for backward compatibility
+          try {
+            const selectedAsHex = Array.from(new TextEncoder().encode(selectedChatroom))
+              .map(b => b.toString(16).padStart(2, '0'))
+              .join('');
+            if (messageRoomId === selectedAsHex) {
+              isMatch = true;
+            }
+          } catch (e) {
+            // Ignore conversion errors
+          }
+          
+          try {
+            if (/^[0-9A-Fa-f]+$/.test(messageRoomId) && messageRoomId.length % 2 === 0) {
+              const bytes = [];
+              for (let i = 0; i < messageRoomId.length; i += 2) {
+                const byte = parseInt(messageRoomId.substring(i, i + 2), 16);
+                if (byte > 0) bytes.push(byte);
+              }
+              const decoded = new TextDecoder('utf-8').decode(new Uint8Array(bytes));
+              if (decoded === selectedChatroom) {
+                isMatch = true;
+              }
+            }
+          } catch (e) {
+            // Ignore decode errors
+          }
+        }
+        
+        if (isMatch) {
+          console.log(`✅ Message matches room ${selectedChatroom}:`, messageRoomId);
+          confirmedMessages.push(message);
+        }
       }
     }
 
-    console.log(`Found ${confirmedMessages.length} confirmed messages`);
+    console.log(`Found ${confirmedMessages.length} confirmed messages for room: ${selectedChatroom}`);
     console.log(`Found ${mempoolMessages.length} mempool messages`);
 
-    // ===== KEY FIX: Proper sorting to show mempool messages at bottom =====
-    
+    // Process mempool messages for encryption
+    const processedMempoolMessages = mempoolMessages.map(msg => processMessageFromPrivateRoom(msg));
+
     // Sort confirmed messages by timestamp (oldest first)
     confirmedMessages.sort((a, b) => a.timestamp - b.timestamp);
     
     // Sort mempool messages by timestamp (oldest first)  
-    mempoolMessages.sort((a, b) => a.timestamp - b.timestamp);
+    processedMempoolMessages.sort((a, b) => a.timestamp - b.timestamp);
     
     // Combine: confirmed messages first, then mempool messages
-    // This ensures mempool (pending) messages appear at the bottom
-    const allMessages = [...confirmedMessages, ...mempoolMessages];
+    const allMessages = [...confirmedMessages, ...processedMempoolMessages];
     
     console.log(`Total messages before dedup: ${allMessages.length}`);
 
@@ -103,7 +176,6 @@ export async function fetchMessages(selectedChatroom) {
         if (!a.pending && b.pending) return -1;
         
         // Within the same type, sort by timestamp (oldest first for both)
-        // This ensures proper chronological order within each group
         return a.timestamp - b.timestamp;
       })
       .slice(-UI_CONFIG.LIMITS.MAX_MESSAGES);
@@ -117,13 +189,16 @@ export async function fetchMessages(selectedChatroom) {
   }
 }
 
-export async function fetchMessagesQuietly(selectedChatroom) {
+export async function fetchMessagesQuietly(selectedChatroom, allRooms = []) {
   try {
     console.log('🔄 Quiet fetch for chatroom:', selectedChatroom);
     
+    // Get the blockchain room ID for the selected room
+    const blockchainRoomId = getBlockchainRoomId(selectedChatroom);
+    
     const [confirmedResponse, mempoolMessages] = await Promise.all([
       fetch(`${API_BASE}/boxes/byAddress/${DEMO_CHAT_CONTRACT}?limit=100`),
-      fetchMempoolMessages(selectedChatroom)
+      fetchMempoolMessages(blockchainRoomId) // Use blockchain room ID for mempool
     ]);
 
     if (!confirmedResponse.ok) return null;
@@ -131,24 +206,78 @@ export async function fetchMessagesQuietly(selectedChatroom) {
     const confirmedData = await confirmedResponse.json();
     if (!confirmedData.items) return null;
 
+    // Parse confirmed messages with encryption support
     const confirmedMessages = [];
     for (const box of confirmedData.items) {
-      const message = parseBoxToMessage(box);
-      if (message && (!selectedChatroom || message.chatroomId === selectedChatroom)) {
-        confirmedMessages.push(message);
+      let message = parseBoxToMessage(box);
+      if (message && message.chatroomId) {
+        // Process the message to handle encrypted room IDs
+        message = processMessageFromPrivateRoom(message);
+        
+        // Enhanced room matching logic (same as fetchMessages)
+        const messageRoomId = message.chatroomId;
+        let isMatch = false;
+        
+        if (!selectedChatroom || selectedChatroom === 'general') {
+          isMatch = messageRoomId === 'general';
+        } else {
+          // Direct match with display room ID
+          if (messageRoomId === selectedChatroom) {
+            isMatch = true;
+          }
+          
+          // Match with blockchain room ID
+          if (messageRoomId === blockchainRoomId) {
+            isMatch = true;
+          }
+          
+          // For encrypted private rooms, also check the blockchain room ID
+          if (message.blockchainRoomId === blockchainRoomId) {
+            isMatch = true;
+          }
+          
+          // Legacy checks for backward compatibility
+          try {
+            const selectedAsHex = Array.from(new TextEncoder().encode(selectedChatroom))
+              .map(b => b.toString(16).padStart(2, '0'))
+              .join('');
+            if (messageRoomId === selectedAsHex) {
+              isMatch = true;
+            }
+          } catch (e) {}
+          
+          try {
+            if (/^[0-9A-Fa-f]+$/.test(messageRoomId) && messageRoomId.length % 2 === 0) {
+              const bytes = [];
+              for (let i = 0; i < messageRoomId.length; i += 2) {
+                const byte = parseInt(messageRoomId.substring(i, i + 2), 16);
+                if (byte > 0) bytes.push(byte);
+              }
+              const decoded = new TextDecoder('utf-8').decode(new Uint8Array(bytes));
+              if (decoded === selectedChatroom) {
+                isMatch = true;
+              }
+            }
+          } catch (e) {}
+        }
+        
+        if (isMatch) {
+          confirmedMessages.push(message);
+        }
       }
     }
 
     console.log(`Quiet fetch: ${confirmedMessages.length} confirmed, ${mempoolMessages.length} mempool`);
 
-    // ===== SAME FIX FOR QUIET FETCH =====
-    
+    // Process mempool messages for encryption
+    const processedMempoolMessages = mempoolMessages.map(msg => processMessageFromPrivateRoom(msg));
+
     // Sort both arrays by timestamp
     confirmedMessages.sort((a, b) => a.timestamp - b.timestamp);
-    mempoolMessages.sort((a, b) => a.timestamp - b.timestamp);
+    processedMempoolMessages.sort((a, b) => a.timestamp - b.timestamp);
     
     // Combine: confirmed first, then mempool
-    const allMessages = [...confirmedMessages, ...mempoolMessages];
+    const allMessages = [...confirmedMessages, ...processedMempoolMessages];
     
     // Deduplicate
     const uniqueMessages = [];
@@ -164,12 +293,8 @@ export async function fetchMessagesQuietly(selectedChatroom) {
     // Final sort: pending messages at bottom
     const newMessages = uniqueMessages
       .sort((a, b) => {
-        // If one is pending and other is not, pending comes last
         if (a.pending && !b.pending) return 1;
         if (!a.pending && b.pending) return -1;
-        
-        // Within the same type, sort by timestamp (oldest first for both)
-        // This ensures proper chronological order within each group
         return a.timestamp - b.timestamp;
       })
       .slice(-UI_CONFIG.LIMITS.MAX_MESSAGES);
@@ -182,7 +307,7 @@ export async function fetchMessagesQuietly(selectedChatroom) {
   }
 }
 
-// ============= MESSAGE SENDING =============
+// ============= MESSAGE SENDING WITH ENCRYPTION SUPPORT =============
 
 export async function sendMessageWithExternalWallet(
   messageContent, 
@@ -190,8 +315,18 @@ export async function sendMessageWithExternalWallet(
   selectedChatroom, 
   stealthMode, 
   selectedWalletErgo, 
-  connectedWalletAddress
+  connectedWalletAddress,
+  allRooms = []
 ) {
+  // Get the blockchain room ID for the transaction
+  const blockchainRoomId = getBlockchainRoomId(selectedChatroom);
+  
+  console.log('Sending message with external wallet:', {
+    displayRoom: selectedChatroom,
+    blockchainRoom: blockchainRoomId,
+    isEncrypted: isEncryptedPrivateRoom(blockchainRoomId)
+  });
+
   // Get wallet information
   const walletInfo = await getWalletInfo(selectedWalletErgo, connectedWalletAddress);
   const { myAddress, height, utxos } = walletInfo;
@@ -211,14 +346,14 @@ export async function sendMessageWithExternalWallet(
   // Use simple encryption for external wallet
   const finalMessage = shouldEncrypt ? simpleEncrypt(messageContent) : messageContent;
 
-  // Create transaction
+  // Create transaction using the blockchain room ID
   const tx = createMessageTx({
     chatContract: DEMO_CHAT_CONTRACT,
     userAddress: myAddress,
     userUtxos: utxos,
     height: height,
     message: finalMessage,
-    chatroomId: selectedChatroom,
+    chatroomId: blockchainRoomId, // Use encrypted room ID for blockchain
     parentId: null,
     customSender: senderName,
     chatrooms: []
@@ -231,21 +366,23 @@ export async function sendMessageWithExternalWallet(
 
     createToastMessage(`📤 Message sent! TX: ${txId.substring(0, 8)}...`, 'success');
 
-    // Create optimistic message with proper timestamp
+    // Create optimistic message with display room ID for UI
     const currentTimestamp = Math.floor(Date.now() / 1000);
     const optimisticMessage = {
       id: txId,
       sender: stealthMode.active ? stealthMode.displayName : truncateAddress(cleanedAddress),
       content: messageContent,
       timestamp: currentTimestamp,
-      chatroomId: selectedChatroom,
+      chatroomId: selectedChatroom, // Use display room ID for UI
+      blockchainRoomId: blockchainRoomId, // Store blockchain room ID for reference
       parentId: null,
       pending: true,
       isMempool: true,
-      source: 'optimistic'
+      source: 'optimistic',
+      isFromEncryptedRoom: isEncryptedPrivateRoom(blockchainRoomId)
     };
 
-    console.log('Created optimistic message with timestamp:', currentTimestamp, new Date(currentTimestamp * 1000));
+    console.log('Created optimistic message with encrypted room support:', currentTimestamp, new Date(currentTimestamp * 1000));
 
     // Update UTXO cache
     const usedBoxIds = getCommonBoxIds(utxos, signed.inputs);
@@ -264,12 +401,23 @@ export async function sendMessageWithMnemonic(
   selectedChatroom, 
   stealthMode, 
   transactionQueue,
-  mnemonicWallet
+  mnemonicWallet,
+  allRooms = []
 ) {
+  // Get the blockchain room ID for the transaction
+  const blockchainRoomId = getBlockchainRoomId(selectedChatroom);
+  
+  console.log('Sending message with mnemonic wallet:', {
+    displayRoom: selectedChatroom,
+    blockchainRoom: blockchainRoomId,
+    isEncrypted: isEncryptedPrivateRoom(blockchainRoomId)
+  });
+
   const messageData = {
     messageContent,
     shouldEncrypt,
-    chatroomId: selectedChatroom,
+    chatroomId: blockchainRoomId, // Use encrypted room ID for blockchain
+    displayChatroomId: selectedChatroom, // Keep display room ID for UI
     stealthMode
   };
 
@@ -277,27 +425,29 @@ export async function sendMessageWithMnemonic(
   
   createToastMessage(`📤 Message sent! TX: ${result.txId.substring(0, 8)}...`, 'success');
 
-  // Create optimistic message with proper timestamp
+  // Create optimistic message with display room ID for UI
   const currentTimestamp = Math.floor(Date.now() / 1000);
   const optimisticMessage = {
     id: result.txId,
     sender: stealthMode.active ? stealthMode.displayName : truncateAddress(result.walletAddress),
     content: result.messageContent,
     timestamp: currentTimestamp,
-    chatroomId: result.chatroomId,
+    chatroomId: result.displayChatroomId || selectedChatroom, // Use display room ID for UI
+    blockchainRoomId: result.chatroomId, // Store blockchain room ID for reference
     parentId: null,
     pending: true,
     isMempool: true,
-    source: 'mnemonic'
+    source: 'mnemonic',
+    isFromEncryptedRoom: isEncryptedPrivateRoom(result.chatroomId)
   };
 
-  console.log('Created mnemonic optimistic message with timestamp:', currentTimestamp, new Date(currentTimestamp * 1000));
+  console.log('Created mnemonic optimistic message with encrypted room support:', currentTimestamp, new Date(currentTimestamp * 1000));
 
   return optimisticMessage;
 }
 
 export async function processSingleMessage(messageData, mnemonicWallet) {
-  const { messageContent, shouldEncrypt, chatroomId, stealthMode } = messageData;
+  const { messageContent, shouldEncrypt, chatroomId, displayChatroomId, stealthMode } = messageData;
   
   try {
     const height = await getCurrentHeight();
@@ -315,15 +465,21 @@ export async function processSingleMessage(messageData, mnemonicWallet) {
     
     const messageBytes = stringToBytes('utf8', finalMessage);
     const senderBytes = stringToBytes('utf8', senderName);
-    const chatroomBytes = stringToBytes('utf8', chatroomId);
+    const chatroomBytes = stringToBytes('utf8', chatroomId); // Use blockchain room ID
     const parentIdBytes = new Uint8Array(0);
+
+    console.log('Creating message box with encrypted room ID:', {
+      displayRoom: displayChatroomId,
+      blockchainRoom: chatroomId,
+      isEncrypted: isEncryptedPrivateRoom(chatroomId)
+    });
 
     const chatBox = new OutputBuilder(CUSTOM_MIN_BOX_VALUE, DEMO_CHAT_CONTRACT)
       .setAdditionalRegisters({
         R4: SColl(SByte, senderBytes).toHex(),
         R5: SColl(SByte, messageBytes).toHex(),
         R6: SLong(timestamp).toHex(),
-        R7: SColl(SByte, chatroomBytes).toHex(),
+        R7: SColl(SByte, chatroomBytes).toHex(), // Encrypted room ID goes to blockchain
         R8: SColl(SByte, parentIdBytes).toHex()
       });
 
@@ -342,7 +498,8 @@ export async function processSingleMessage(messageData, mnemonicWallet) {
       txId,
       messageContent: messageContent,
       timestamp,
-      chatroomId,
+      chatroomId, // Blockchain room ID
+      displayChatroomId, // Display room ID
       walletAddress
     };
     
@@ -352,7 +509,7 @@ export async function processSingleMessage(messageData, mnemonicWallet) {
   }
 }
 
-// ============= SIMPLE ENCRYPTION =============
+// ============= SIMPLE ENCRYPTION (Keep existing) =============
 
 export function simpleEncrypt(text, secretKey = "ergochat") {
   if (!text || typeof text !== 'string') return text;
@@ -367,7 +524,7 @@ export function simpleEncrypt(text, secretKey = "ergochat") {
   return "enc-" + encrypted;
 }
 
-// ============= MESSAGE REFRESH UTILITIES =============
+// ============= MESSAGE REFRESH UTILITIES (Keep existing) =============
 
 export function createMessageRefreshManager() {
   let refreshInterval = null;
@@ -393,13 +550,8 @@ export function createMessageRefreshManager() {
   };
 }
 
-// ============= MESSAGE SORTING UTILITIES =====
+// ============= MESSAGE SORTING UTILITIES (Keep existing) =============
 
-/**
- * Sort messages with proper ordering: confirmed messages by timestamp, then pending messages
- * @param {Array} messages - Array of message objects
- * @returns {Array} - Properly sorted messages
- */
 export function sortMessagesWithPendingAtBottom(messages) {
   if (!Array.isArray(messages)) return [];
   
@@ -409,17 +561,10 @@ export function sortMessagesWithPendingAtBottom(messages) {
     if (!a.pending && b.pending) return -1;
     
     // Within the same type, sort by timestamp (oldest first for both)
-    // This ensures proper chronological order: older messages appear higher
     return a.timestamp - b.timestamp;
   });
 }
 
-/**
- * Enhanced message update checker that considers pending status
- * @param {Array} newMessages - New messages array
- * @param {Array} currentMessages - Current messages array
- * @returns {boolean} - True if update is needed
- */
 export function shouldUpdateMessages(newMessages, currentMessages) {
   if (!Array.isArray(newMessages) || !Array.isArray(currentMessages)) {
     return true;
@@ -438,11 +583,6 @@ export function shouldUpdateMessages(newMessages, currentMessages) {
   });
 }
 
-/**
- * Separate messages into confirmed and pending arrays
- * @param {Array} messages - Mixed messages array
- * @returns {Object} - Object with confirmed and pending arrays
- */
 export function separateMessagesByStatus(messages) {
   if (!Array.isArray(messages)) {
     return { confirmed: [], pending: [] };
@@ -458,12 +598,6 @@ export function separateMessagesByStatus(messages) {
   return { confirmed, pending };
 }
 
-/**
- * Merge confirmed and pending messages with proper ordering
- * @param {Array} confirmed - Confirmed messages
- * @param {Array} pending - Pending messages
- * @returns {Array} - Merged and sorted messages
- */
 export function mergeMessages(confirmed, pending) {
   const confirmedSorted = confirmed.sort((a, b) => a.timestamp - b.timestamp);
   const pendingSorted = pending.sort((a, b) => a.timestamp - b.timestamp);
@@ -472,12 +606,6 @@ export function mergeMessages(confirmed, pending) {
   return [...confirmedSorted, ...pendingSorted];
 }
 
-/**
- * Add optimistic message to existing messages array
- * @param {Array} existingMessages - Current messages
- * @param {Object} optimisticMessage - New optimistic message
- * @returns {Array} - Updated messages array
- */
 export function addOptimisticMessage(existingMessages, optimisticMessage) {
   if (!optimisticMessage) return existingMessages;
   
@@ -490,22 +618,10 @@ export function addOptimisticMessage(existingMessages, optimisticMessage) {
   return sortMessagesWithPendingAtBottom(updatedMessages);
 }
 
-/**
- * Remove optimistic message when confirmed version arrives
- * @param {Array} messages - Current messages
- * @param {string} messageId - ID of message to remove
- * @returns {Array} - Updated messages array
- */
 export function removeOptimisticMessage(messages, messageId) {
   return messages.filter(msg => msg.id !== messageId);
 }
 
-/**
- * Update message status from pending to confirmed
- * @param {Array} messages - Current messages
- * @param {string} messageId - ID of message to update
- * @returns {Array} - Updated messages array
- */
 export function updateMessageStatus(messages, messageId) {
   const updatedMessages = messages.map(msg => {
     if (msg.id === messageId) {
@@ -521,12 +637,11 @@ export function updateMessageStatus(messages, messageId) {
   return sortMessagesWithPendingAtBottom(updatedMessages);
 }
 
-// ============= SCROLL UTILITIES =============
+// ============= SCROLL UTILITIES (Keep existing) =============
 
 export function scrollToBottom(chatContainer, autoScroll) {
   if (chatContainer && autoScroll) {
     setTimeout(() => {
-      // Scroll to the very bottom where pending messages are
       chatContainer.scrollTop = chatContainer.scrollHeight;
     }, 100);
   }
@@ -535,15 +650,9 @@ export function scrollToBottom(chatContainer, autoScroll) {
 export function checkAutoScroll(chatContainer) {
   if (!chatContainer) return true;
   const { scrollTop, scrollHeight, clientHeight } = chatContainer;
-  // Consider user to be at bottom if within 100px of bottom
   return scrollHeight - scrollTop - clientHeight < 100;
 }
 
-/**
- * Scroll to bottom with animation
- * @param {Element} chatContainer - Chat container element
- * @param {boolean} smooth - Whether to use smooth scrolling
- */
 export function scrollToBottomSmooth(chatContainer, smooth = true) {
   if (!chatContainer) return;
   
@@ -557,13 +666,8 @@ export function scrollToBottomSmooth(chatContainer, smooth = true) {
   }
 }
 
-// ============= DEBUG UTILITIES =============
+// ============= DEBUG UTILITIES (Keep existing) =============
 
-/**
- * Debug function to log message ordering
- * @param {Array} messages - Messages to debug
- * @param {string} context - Context description
- */
 export function debugMessageOrder(messages, context = 'Messages') {
   console.group(`🐛 Debug ${context} (${messages.length} total)`);
   
@@ -577,11 +681,6 @@ export function debugMessageOrder(messages, context = 'Messages') {
   console.groupEnd();
 }
 
-/**
- * Validate message structure
- * @param {Object} message - Message to validate
- * @returns {boolean} - True if valid
- */
 export function isValidMessage(message) {
   return message &&
          typeof message === 'object' &&
@@ -592,11 +691,6 @@ export function isValidMessage(message) {
          typeof message.chatroomId === 'string';
 }
 
-/**
- * Clean up messages array by removing invalid messages
- * @param {Array} messages - Messages to clean
- * @returns {Array} - Cleaned messages
- */
 export function cleanMessages(messages) {
   if (!Array.isArray(messages)) return [];
   
