@@ -34,6 +34,15 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self' 'unsafe-inline';
+  style-src 'self' 'unsafe-inline';
+  img-src 'self' data: https:;
+  connect-src 'self' https://api.ergoplatform.com https://ergochats.vercel.app;
+  object-src 'none';
+  base-uri 'none';
+">
 <link rel="icon" href="%sveltekit.assets%/favicon.png" />
 <link rel="apple-touch-icon" type="image/png" href="%sveltekit.assets%/apple-touch-icon.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />

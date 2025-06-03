@@ -4819,3 +4819,475 @@ border-top-color: #FFFFFF;
   color: var(--text-secondary, rgba(255, 255, 255, 0.7));
   font-style: italic;
 }
+  /* Main container styles */
+  .ergochat {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    width: 100%;
+    background: linear-gradient(180deg, #000000, #111111);
+    color: var(--text-color, #ffffff);
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+  }
+
+  .chat-main {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .messages-container {
+    flex: 1;
+    overflow-y: auto;
+    scroll-behavior: smooth;
+    min-height: 0;
+  }
+
+  /* Custom scrollbar */
+  .messages-container::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .messages-container::-webkit-scrollbar-track {
+    background: var(--background-color, #1a1a1a);
+  }
+
+  .messages-container::-webkit-scrollbar-thumb {
+    background: var(--primary-color, #FF5500);
+    border-radius: 4px;
+  }
+
+  .messages-container::-webkit-scrollbar-thumb:hover {
+    background: #ff7733;
+  }
+
+  /* Theme classes */
+  .dark {
+    --primary-color: #FF5500;
+    --primary-hover: #ff6b1a;
+    --success-color: #4CAF50;
+    --warning-color: #ffc107;
+    --surface-color: #262626;
+    --background-color: #1a1a1a;
+    --text-color: #ffffff;
+    --text-secondary: rgba(255, 255, 255, 0.7);
+    --border-color: rgba(255, 85, 0, 0.2);
+    --hover-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .light {
+    --primary-color: #FF5500;
+    --primary-hover: #ff6b1a;
+    --success-color: #4CAF50;
+    --warning-color: #ffc107;
+    --surface-color: #ffffff;
+    --background-color: #f5f5f5;
+    --text-color: #000000;
+    --text-secondary: rgba(0, 0, 0, 0.7);
+    --border-color: rgba(255, 85, 0, 0.2);
+    --hover-color: rgba(0, 0, 0, 0.05);
+  }
+
+  /* Compact mode */
+  .compact {
+    font-size: 14px;
+  }
+
+  .compact .chat-main {
+    gap: 8px;
+  }
+
+  /* Animations */
+  .animations-enabled * {
+    transition: all 0.2s ease;
+  }
+
+  .animations-enabled .messages-container {
+    transition: none; /* Don't animate scroll container */
+  }
+
+  /* Loading states */
+  .ergochat.loading {
+    pointer-events: none;
+  }
+
+  .ergochat.loading::after {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.1);
+    backdrop-filter: blur(2px);
+    z-index: 500;
+  }
+
+  /* Focus management */
+  .ergochat:focus-within {
+    outline: none;
+  }
+
+  /* Responsive design */
+  @media (max-width: 768px) {
+    .ergochat {
+      font-size: 14px;
+    }
+
+    .chat-main {
+      gap: 0;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .ergochat {
+      font-size: 13px;
+    }
+  }
+
+  /* Accessibility */
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+    
+    .animations-enabled * {
+      transition: none !important;
+    }
+  }
+
+  /* High contrast mode */
+  @media (prefers-contrast: high) {
+    .ergochat {
+      border: 2px solid var(--primary-color);
+    }
+    
+    .dark {
+      --border-color: rgba(255, 85, 0, 0.5);
+    }
+    
+    .light {
+      --border-color: rgba(255, 85, 0, 0.3);
+    }
+  }
+
+  /* Print styles */
+  @media print {
+    .ergochat {
+      background: white !important;
+      color: black !important;
+    }
+    
+    .chat-main {
+      overflow: visible !important;
+    }
+    
+    .messages-container {
+      overflow: visible !important;
+      height: auto !important;
+    }
+  }
+
+  /* Dark mode for system preference */
+  @media (prefers-color-scheme: dark) {
+    .ergochat:not(.light) {
+      background: linear-gradient(180deg, #000000, #111111);
+    }
+  }
+
+  /* Light mode for system preference */
+  @media (prefers-color-scheme: light) {
+    .ergochat.light {
+      background: linear-gradient(180deg, #f8f9fa, #ffffff);
+    }
+  }
+
+  /* Error state styling */
+  .ergochat.error {
+    border-top: 3px solid #dc3545;
+  }
+
+  /* Connected state styling */
+  .ergochat.connected {
+    border-top: 3px solid var(--success-color, #4CAF50);
+  }
+
+  /* Disconnected state styling */
+  .ergochat.disconnected {
+    border-top: 3px solid var(--warning-color, #ffc107);
+  }
+
+  /* Selection styling */
+  ::selection {
+    background: var(--primary-color, #FF5500);
+    color: white;
+  }
+
+  ::-moz-selection {
+    background: var(--primary-color, #FF5500);
+    color: white;
+  }
+
+  /* Focus ring for keyboard navigation */
+  .ergochat *:focus {
+    outline: 2px solid var(--primary-color, #FF5500);
+    outline-offset: 2px;
+  }
+
+  .ergochat button:focus,
+  .ergochat input:focus,
+  .ergochat textarea:focus {
+    outline: 2px solid var(--primary-color, #FF5500);
+    outline-offset: 2px;
+  }
+
+  /* Skip to content link for accessibility */
+  .skip-link {
+    position: absolute;
+    top: -40px;
+    left: 6px;
+    background: var(--primary-color, #FF5500);
+    color: white;
+    padding: 8px;
+    text-decoration: none;
+    border-radius: 4px;
+    z-index: 10000;
+  }
+
+  .skip-link:focus {
+    top: 6px;
+  }
+
+  /* Status indicators */
+  .status-indicator {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    padding: 8px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    z-index: 100;
+    opacity: 0;
+    transform: translateY(20px);
+    transition: all 0.3s ease;
+  }
+
+  .status-indicator.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .status-indicator.connecting {
+    background: var(--warning-color, #ffc107);
+    color: #000;
+  }
+
+  .status-indicator.connected {
+    background: var(--success-color, #4CAF50);
+    color: white;
+  }
+
+  .status-indicator.error {
+    background: #dc3545;
+    color: white;
+  }
+
+  /* Notification badge for unread messages */
+  .unread-badge {
+    position: relative;
+  }
+
+  .unread-badge::after {
+    content: '';
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    width: 8px;
+    height: 8px;
+    background: #dc3545;
+    border-radius: 50%;
+    border: 2px solid var(--surface-color, #262626);
+  }
+
+  /* Loading overlay */
+  .loading-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+  }
+
+  .loading-spinner {
+    width: 48px;
+    height: 48px;
+    border: 4px solid rgba(255, 85, 0, 0.3);
+    border-top-color: var(--primary-color, #FF5500);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* Responsive breakpoints */
+  @media (max-width: 1200px) {
+    .ergochat {
+      font-size: 15px;
+    }
+  }
+
+  @media (max-width: 992px) {
+    .ergochat {
+      font-size: 14px;
+    }
+  }
+
+  @media (max-width: 576px) {
+    .ergochat {
+      font-size: 13px;
+    }
+    
+    .status-indicator {
+      bottom: 10px;
+      right: 10px;
+      left: 10px;
+      text-align: center;
+    }
+  }
+
+  /* Performance optimizations */
+  .ergochat {
+    contain: layout style paint;
+    will-change: auto;
+  }
+
+  .messages-container {
+    contain: strict;
+    will-change: scroll-position;
+  }
+
+  /* Prevent layout shift */
+  .ergochat img,
+  .ergochat video {
+    height: auto;
+    max-width: 100%;
+  }
+
+  /* Safe area insets for mobile devices */
+  @supports (padding-top: env(safe-area-inset-top)) {
+    .ergochat {
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-left: env(safe-area-inset-left);
+      padding-right: env(safe-area-inset-right);
+    }
+  }
+
+  /* Hover effects for interactive elements */
+  @media (hover: hover) {
+    .ergochat button:hover,
+    .ergochat .clickable:hover {
+      transform: translateY(-1px);
+    }
+  }
+
+  /* Touch-friendly sizing */
+  @media (pointer: coarse) {
+    .ergochat button,
+    .ergochat input,
+    .ergochat textarea {
+      min-height: 44px;
+      min-width: 44px;
+    }
+  }
+
+  /* Reduced transparency for better readability */
+  @media (prefers-reduced-transparency: reduce) {
+    .ergochat {
+      backdrop-filter: none;
+    }
+    
+    .modal-backdrop,
+    .loading-overlay {
+      backdrop-filter: none;
+    }
+  }
+
+  /* Force color mode classes */
+  .ergochat.force-dark {
+    color-scheme: dark;
+  }
+
+  .ergochat.force-light {
+    color-scheme: light;
+  }
+
+  /* Smooth scrolling for better UX */
+  .ergochat {
+    scroll-behavior: smooth;
+  }
+
+  /* Hide scrollbars on mobile for cleaner look */
+  @media (max-width: 768px) {
+    .messages-container {
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+    
+    .messages-container::-webkit-scrollbar {
+      display: none;
+    }
+  }
+
+  /* Ensure proper stacking contexts */
+  .ergochat > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* Error boundary styling */
+  .error-boundary {
+    padding: 40px 20px;
+    text-align: center;
+    background: var(--surface-color, #262626);
+    border: 1px solid #dc3545;
+    border-radius: 8px;
+    margin: 20px;
+  }
+
+  .error-boundary h2 {
+    color: #dc3545;
+    margin-bottom: 16px;
+  }
+
+  .error-boundary p {
+    color: var(--text-secondary, rgba(255, 255, 255, 0.7));
+    margin-bottom: 20px;
+  }
+
+  .error-boundary button {
+    background: var(--primary-color, #FF5500);
+    color: white;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+
+  .error-boundary button:hover {
+    background: #ff7733;
+  }

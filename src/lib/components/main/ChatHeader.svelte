@@ -1,8 +1,9 @@
-<!-- ChatHeader.svelte - Fully Responsive Mobile-First Design -->
+<!-- ChatHeader.svelte - Fully Responsive with StealthAddressUI -->
 <script>
   import { createEventDispatcher, onMount } from 'svelte';
   import { slide, fade } from 'svelte/transition';
   import WalletButton from '$lib/components/nav/WalletButton.svelte';
+  import StealthAddressUI from '$lib/components/main/StealthAddressUI.svelte';
   import { truncateAddress } from '$lib/utils/chatConstants.js';
   
   export let currentRoom = null;
@@ -17,6 +18,8 @@
   export let loading = false;
   export let stealthMode = { active: false, displayName: '' };
   export let kyaAccepted = false;
+  export let getUnreadCount = () => 0;
+  export let roomHasUnread = () => false;
   
   const dispatch = createEventDispatcher();
   
@@ -106,6 +109,10 @@
     dispatch('disconnectWallet');
   }
   
+  function handleStealthModeChanged(event) {
+    dispatch('stealthModeChanged', event);
+  }
+  
   function toggleRoomList() {
     if (isMobile) {
       showMobileMenu = !showMobileMenu;
@@ -167,10 +174,15 @@
               <span class="message-count">{messages.length} messages</span>
             {/if}
           </div>
+          {#if roomHasUnread(selectedChatroom)}
+            <div class="unread-badge mobile">
+              {getUnreadCount(selectedChatroom)}
+            </div>
+          {/if}
         </div>
       </div>
       
-      <!-- Right: Logo + Wallet -->
+      <!-- Right: Logo + Stealth + Wallet -->
       <div class="mobile-right">
         <div class="mobile-logo">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
@@ -178,6 +190,18 @@
           </svg>
           <span>Pulse</span>
         </div>
+        
+        <!-- Mobile Stealth UI -->
+        {#if walletConnected}
+          <div class="mobile-stealth">
+            <StealthAddressUI 
+              {walletConnected} 
+              currentAddress={currentWalletAddress}
+              compact={true}
+              on:stealthModeChanged={handleStealthModeChanged}
+            />
+          </div>
+        {/if}
         
         {#if walletConnected}
           <button class="mobile-wallet-btn connected" on:click={toggleWalletMenu}>
@@ -283,7 +307,7 @@
                     <div class="category-label">{category.name} ({category.rooms.length})</div>
                     {#each category.rooms as room}
                       <button 
-                        class="mobile-room-item {selectedChatroom === room.id ? 'active' : ''}"
+                        class="mobile-room-item {selectedChatroom === room.id ? 'active' : ''} {roomHasUnread(room.id) ? 'has-unread' : ''}"
                         on:click={() => selectChatroom(room.id)}
                       >
                         <div class="room-main">
@@ -300,6 +324,11 @@
                               <span class="room-description">{room.description}</span>
                             {/if}
                           </div>
+                          {#if getUnreadCount(room.id) > 0 && room.id !== selectedChatroom}
+                            <div class="unread-badge">
+                              {getUnreadCount(room.id)}
+                            </div>
+                          {/if}
                         </div>
                         <div class="room-actions">
                           <button class="action-btn" on:click={(e) => handleShowRoomInfo(room, e)}>
@@ -354,7 +383,7 @@
               <div class="category-label">{category.name}</div>
               {#each category.rooms as room}
                 <button 
-                  class="mobile-room-item {selectedChatroom === room.id ? 'active' : ''}"
+                  class="mobile-room-item {selectedChatroom === room.id ? 'active' : ''} {roomHasUnread(room.id) ? 'has-unread' : ''}"
                   on:click={() => selectChatroom(room.id)}
                 >
                   <span class="room-icon">
@@ -365,6 +394,11 @@
                     {/if}
                   </span>
                   <span class="room-name">{room.name}</span>
+                  {#if getUnreadCount(room.id) > 0 && room.id !== selectedChatroom}
+                    <div class="unread-badge">
+                      {getUnreadCount(room.id)}
+                    </div>
+                  {/if}
                 </button>
               {/each}
             </div>
@@ -402,6 +436,11 @@
             {#if messages.length > 0}
               <span class="message-count">{messages.length}</span>
             {/if}
+            {#if roomHasUnread(selectedChatroom)}
+              <div class="unread-badge desktop">
+                {getUnreadCount(selectedChatroom)}
+              </div>
+            {/if}
           </button>
 
           {#if showRoomList}
@@ -417,7 +456,7 @@
                     
                     {#each category.rooms as room}
                       <button 
-                        class="room-item {selectedChatroom === room.id ? 'active' : ''}"
+                        class="room-item {selectedChatroom === room.id ? 'active' : ''} {roomHasUnread(room.id) ? 'has-unread' : ''}"
                         on:click={() => selectChatroom(room.id)}
                       >
                         <div class="room-main">
@@ -434,6 +473,11 @@
                               <span class="room-description">{room.description}</span>
                             {/if}
                           </div>
+                          {#if getUnreadCount(room.id) > 0 && room.id !== selectedChatroom}
+                            <div class="unread-badge">
+                              {getUnreadCount(room.id)}
+                            </div>
+                          {/if}
                         </div>
                         
                         <div class="room-actions">
@@ -505,6 +549,15 @@
       
       <div class="header-right">
         <div class="header-controls">
+          <!-- Stealth Address UI -->
+          {#if walletConnected}
+            <StealthAddressUI 
+              {walletConnected} 
+              currentAddress={currentWalletAddress}
+              on:stealthModeChanged={handleStealthModeChanged}
+            />
+          {/if}
+
           <!-- Theme Toggle -->
           <button class="control-btn" on:click={handleToggleTheme} title="Toggle theme">
             {#if isDarkMode}
@@ -600,7 +653,7 @@
 <style>
   /* ============= BASE STYLES ============= */
   .chat-header {
-    background: var(--surface-color, #262626);
+
     border-bottom: 1px solid var(--border-color, rgba(255, 85, 0, 0.2));
     color: var(--text-primary, #ffffff);
     position: sticky;
@@ -652,6 +705,7 @@
     padding: 8px;
     border-radius: 6px;
     transition: background 0.2s ease;
+    position: relative;
   }
 
   .mobile-room-info:hover {
@@ -687,7 +741,7 @@
   .mobile-right {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
     flex-shrink: 0;
   }
 
@@ -698,6 +752,11 @@
     color: var(--primary-color, #FF5500);
     font-weight: 700;
     font-size: 14px;
+  }
+
+  .mobile-stealth {
+    display: flex;
+    align-items: center;
   }
 
   .mobile-wallet-btn {
@@ -743,6 +802,36 @@
   .wallet-address {
     font-family: monospace;
     font-size: 11px;
+  }
+
+  /* Unread badges */
+  .unread-badge {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    background: #dc3545;
+    color: white;
+    border-radius: 9px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 0 6px;
+    margin-left: 8px;
+  }
+
+  .unread-badge.mobile {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    min-width: 16px;
+    height: 16px;
+    font-size: 10px;
+    border-radius: 8px;
+  }
+
+  .unread-badge.desktop {
+    margin-left: 12px;
   }
 
   /* Mobile Menu Overlay */
@@ -881,6 +970,7 @@
     border-radius: 6px;
     transition: all 0.2s ease;
     margin-bottom: 4px;
+    position: relative;
   }
 
   .mobile-room-item:hover {
@@ -890,6 +980,11 @@
   .mobile-room-item.active {
     background: var(--primary-color);
     color: white;
+  }
+
+  .mobile-room-item.has-unread {
+    background: rgba(220, 53, 69, 0.1);
+    border-left: 4px solid #dc3545;
   }
 
   .room-main {
@@ -910,14 +1005,6 @@
     flex-direction: column;
     min-width: 0;
     flex: 1;
-  }
-
-  .room-name {
-    font-weight: 500;
-    font-size: 14px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 
   .room-description {
@@ -1077,6 +1164,7 @@
     font-size: 14px;
     font-weight: 500;
     min-width: 200px;
+    position: relative;
   }
 
   .room-selector-btn:hover,
@@ -1127,6 +1215,7 @@
     max-height: 400px;
     overflow-y: auto;
     margin-top: 4px;
+    min-width: 400px;
   }
 
   .room-category {
@@ -1171,6 +1260,7 @@
     border-radius: 6px;
     transition: all 0.2s ease;
     margin-bottom: 4px;
+    position: relative;
   }
 
   .room-item:hover {
@@ -1180,6 +1270,11 @@
   .room-item.active {
     background: var(--primary-color);
     color: white;
+  }
+
+  .room-item.has-unread {
+    background: rgba(220, 53, 69, 0.08);
+    border-left: 4px solid #dc3545;
   }
 
   .room-management {
@@ -1388,6 +1483,34 @@
     
     .management-grid {
       grid-template-columns: repeat(1, 1fr);
+    }
+
+    .room-dropdown {
+      min-width: 350px;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .mobile-header {
+      padding: 10px 12px;
+      min-height: 56px;
+    }
+
+    .mobile-right {
+      gap: 6px;
+    }
+
+    .mobile-logo span {
+      display: none;
+    }
+
+    .mobile-stealth {
+      display: none;
+    }
+
+    .mobile-wallet-btn {
+      font-size: 11px;
+      padding: 6px 10px;
     }
   }
 
